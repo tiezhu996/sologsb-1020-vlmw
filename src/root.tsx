@@ -8,7 +8,7 @@ export default component$(() => (
       <meta charset="utf-8" />
       <meta name="viewport" content="width=device-width, initial-scale=1" />
       <meta name="theme-color" content="#173247" />
-      <title>档案元数据核对台</title>
+      <title>碑帖拓片版本比对台</title>
     </head>
     <body>
       <App />

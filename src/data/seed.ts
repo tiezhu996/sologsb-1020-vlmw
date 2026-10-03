@@ -1,55 +1,111 @@
-import type { ArchiveRecord, ArchiveState } from '../types';
-import { computeMatches } from '../utils/matching';
+import type { DeskState, Dispute, FieldState, RubbingRecord } from '../types';
+import { now } from '../utils/reconcile';
 
-const now = new Date().toISOString();
-
-const makeRecord = (
-  id: string,
-  group: 'A' | 'B',
-  title: string,
-  date: string,
-  people: string[],
-  places: string[],
-  identifier: string,
-  medium: string,
-  extent: string,
-  rights: string,
-  notes: string
-): ArchiveRecord => ({
-  id, group, title, date, people, places, identifier, medium, extent, rights, notes,
-  updatedAt: now,
-  status: 'unreviewed'
+const field = (variants: string[], chosen: string | null = null): FieldState => ({
+  variants,
+  chosen,
+  confirmed: chosen !== null,
+  confirmedAt: chosen !== null ? now() : null
 });
 
-export const seedRecords = (): ArchiveRecord[] => [
-  makeRecord('a-001', 'A', '李秀珍口述史访谈', '2019-04-12', ['李秀珍', '周明远'], ['临河县', '河口村'], 'OH-LXZ-2019-01', '数字录音', '02:14:38', '研究者授权', '访谈共三个音频文件'),
-  makeRecord('b-001', 'B', '李秀珍女士口述访谈记录', '2019-04-12', ['李秀珍', '周明远'], ['临河县', '河口村'], 'OH-2019-001', '数字音频', '2小时14分', '仅限研究使用', '附件含访谈提纲和照片'),
-  makeRecord('a-002', 'A', '渡口船工王德海回忆', '2017-09-03', ['王德海'], ['白沙镇', '老渡口'], 'MS-WDH-17', '手稿扫描', '18页', '家属授权', '第三页有手写补记'),
-  makeRecord('b-002', 'B', '王德海口述：渡口与船工生活', '2017-09-03', ['王德海'], ['白沙镇'], 'OH-2017-088', '录音', '01:42:10', '家属授权', '原编号与手稿组共用一个采访批次'),
-  makeRecord('a-003', 'A', '张惠兰与县立女子中学', '2020-11-08', ['张惠兰'], ['临河县'], 'OH-ZHL-2020-04', '数字录音', '56分钟', '未签授权文件', '需补充授权确认'),
-  makeRecord('b-003', 'B', '张惠兰访谈', '2020-11-08', ['张惠兰'], ['临河县', '县立女子中学'], 'OH-2020-004', '数字录音', '00:56:22', '待补授权', '内容涉及女子中学创建'),
-  makeRecord('a-004', 'A', '木版年画艺人陈桂生', '2015-06-21', ['陈桂生'], ['桃花乡'], 'CRAFT-CGS-2015', 'DV录像', '86分钟', 'CC BY-NC 4.0', '记录了套色过程'),
-  makeRecord('b-004', 'B', '陈桂生师傅年画工艺访谈', '2015-06-22', ['陈桂生', '许小琴'], ['桃花乡'], 'CRAFT-2015-06', '视频', '01:26:04', 'CC BY-NC 4.0', '拍摄日期可能相差一天'),
-  makeRecord('a-005', 'A', '赤水河盐运档案访谈（上）', '2018-02-15', ['杨启富'], ['赤水镇'], 'OH-YQF-2018-A', '数字录音', '01:10:00', '研究者授权', ''),
-  makeRecord('b-005', 'B', '杨启富谈赤水河盐运', '2018-02-15', ['杨启富'], ['赤水镇', '盐仓'], 'OH-2018-050', '数字录音', '01:10:18', '研究者授权', '元数据人员补充了地点“盐仓”'),
-  makeRecord('a-006', 'A', '民间中医刘绍安手稿', '1998-12-01', ['刘绍安'], ['安平村'], 'MS-LSA-1998', '纸质手稿', '34页', '公版', '作者去世已满五十年'),
-  makeRecord('b-006', 'B', '刘绍安医案抄本', '1998-11-30', ['刘绍安'], ['安平村'], 'MANU-LSA-98', '扫描件', '33页', '公版', '日期按抄本落款录为11月30日'),
-  makeRecord('a-007', 'A', '铁路建设者赵春生采访', '2021-07-09', ['赵春生'], ['北岭市'], 'OH-ZCS-2021', '数字录音', '01:03:42', '研究者授权', ''),
-  makeRecord('b-007', 'B', '赵春生同志口述', '2021-07-09', ['赵春生'], ['北岭市', '青石岭'], 'OH-2021-071', '数字录音', '01:04:01', '研究者授权', '包含铁路工地地点'),
-  makeRecord('a-008', 'A', '女书传人何玉莲唱本', '2013-05-18', ['何玉莲'], ['上江乡'], 'MS-HYL-2013', '手稿影像', '42页', '需联系后人', '缺第12页'),
-  makeRecord('b-008', 'B', '何玉莲女书唱本扫描件', '2013-05-18', ['何玉莲'], ['上江乡'], 'MANU-HYL-13', '扫描件', '41页', '联系人待定', '扫描时第12页缺失')
+const makeRecord = (partial: Partial<RubbingRecord> & Pick<RubbingRecord, 'stableId' | 'localNo' | 'title' | 'batch' | 'originalStone' | 'scanFingerprint'>): RubbingRecord => ({
+  aliases: [],
+  paper: field([]),
+  rubber: field([]),
+  seals: field([]),
+  notes: '',
+  createdAt: now(),
+  updatedAt: now(),
+  lastImportItemNo: null,
+  ...partial
+});
+
+export const seedRecords = (): RubbingRecord[] => [
+  makeRecord({
+    stableId: 'TK-001',
+    // 本机改过编号：旧编号在外场包里仍会出现，靠稳定编号与别名挂回
+    localNo: '善本-甲-001',
+    aliases: ['BJT-2019-001'],
+    title: '九成宫醴泉铭',
+    batch: '北宋拓本摹刻·第三批',
+    originalStone: '麟游县九成宫故址（石存麟游）',
+    scanFingerprint: 'sha256:9c3a6f21e0b4',
+    paper: field(['清乾隆仿藏经纸'], '清乾隆仿藏经纸'),
+    rubber: field(['浓墨乌金拓']),
+    seals: field(['“欧阳信本”朱文印']),
+    notes: '馆藏一级，纸背有旧签。'
+  }),
+  makeRecord({
+    stableId: 'TK-002',
+    localNo: 'TK-002',
+    title: '多宝塔感应碑',
+    batch: '明中期摹刻·首批',
+    originalStone: '西安碑林第一室',
+    scanFingerprint: 'sha256:41be77d89a10',
+    paper: field(['棉连纸']),
+    // 拓工两说并存，等待裁定
+    rubber: field(['乌金拓', '蝉翼拓']),
+    seals: field(['“颜氏家藏”半印'])
+  }),
+  makeRecord({
+    stableId: 'TK-003',
+    localNo: 'TK-003',
+    title: '郃阳令曹全碑',
+    batch: '明末摹刻·第二批',
+    originalStone: '西安碑林第三室',
+    scanFingerprint: 'sha256:77e02cc31af5',
+    paper: field(['白棉纸']),
+    rubber: field(['淡墨蝉翼拓']),
+    seals: field(['未发现钤印'])
+  }),
+  makeRecord({
+    stableId: 'TK-004',
+    localNo: 'TK-004',
+    title: '汉故谷城长荡阴令张君表颂（张迁碑）',
+    batch: '清乾隆摹刻·第二批',
+    originalStone: '山东泰安岱庙',
+    scanFingerprint: 'sha256:5d91b4062c88',
+    paper: field(['皮纸']),
+    rubber: field(['乌金拓']),
+    seals: field(['“东郡张氏”白文印'])
+  })
 ];
 
-export const seedState = (): ArchiveState => {
+export const seedState = (): DeskState => {
   const records = seedRecords();
+  const disputes: Dispute[] = [];
+  records.forEach((record) => {
+    (['paper', 'rubber', 'seals'] as const).forEach((key) => {
+      const state = record[key];
+      if (!state.confirmed && state.variants.length >= 2) {
+        disputes.push({
+          id: `${record.stableId}:${key}`,
+          stableId: record.stableId,
+          field: key,
+          variants: [...state.variants],
+          status: 'pending',
+          sourceItemNo: null,
+          createdAt: now(),
+          resolvedAt: null,
+          resolution: null
+        });
+      }
+    });
+  });
+
   return {
     revision: 1,
     records,
-    matches: computeMatches(records),
-    merges: [],
-    audit: [{ id: 'seed', at: now, action: '初始化数据', detail: '导入两组示例口述史与手稿记录并完成首轮匹配', recordIds: [] }],
-    activeMatchId: '',
-    selectedRecordIds: [],
+    disputes,
+    audit: [{
+      id: 'seed',
+      at: now(),
+      action: '初始化本机台账',
+      detail: '载入四件碑帖拓片本机记录，其中《多宝塔感应碑》拓工一项已有两说待裁',
+      stableIds: records.map((record) => record.stableId)
+    }],
+    importedItems: [],
+    importBatches: [],
     hydrated: false
   };
 };

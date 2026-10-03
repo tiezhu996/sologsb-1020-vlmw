@@ -1,0 +1,83 @@
+{
+  "packageId": "WAIHUI-2026-09-B",
+  "packageVersion": 2,
+  "exportedAt": "2026-09-28T09:20:00.000Z",
+  "team": "外场编目组·关中片",
+  "items": [
+    {
+      "itemNo": "001",
+      "stableId": "TK-001",
+      "rubbingNo": "BJT-2019-001",
+      "title": "九成宫醴泉铭",
+      "batch": "北宋拓本摹刻·第三批",
+      "originalStone": "麟游县九成宫故址",
+      "scanFingerprint": "sha256:9c3a6f21e0b4",
+      "paper": "清中期竹纸",
+      "rubber": "浓墨乌金拓",
+      "seals": "善化张氏鉴藏白文印",
+      "notes": "外场复核见到纸边裁切痕"
+    },
+    {
+      "itemNo": "002",
+      "stableId": "TK-002",
+      "rubbingNo": "TK-002",
+      "title": "多宝塔感应碑",
+      "batch": "明中期摹刻·首批",
+      "originalStone": "西安碑林第一室",
+      "scanFingerprint": "sha256:41be77d8a2f7",
+      "paper": "棉连纸",
+      "rubber": "蝉翼拓",
+      "seals": "颜氏家藏半印"
+    },
+    {
+      "itemNo": "003",
+      "stableId": "TK-003",
+      "rubbingNo": "TK-003",
+      "title": "郃阳令曹全碑",
+      "batch": "明末摹刻·第二批",
+      "originalStone": "西安碑林第三室",
+      "scanFingerprint": "sha256:77e02cc99de1",
+      "paper": "白棉纸",
+      "rubber": "擦墨拓",
+      "seals": "未发现钤印"
+    },
+    {
+      "itemNo": "004",
+      "stableId": "TK-005",
+      "rubbingNo": "TK-005",
+      "title": "颜勤礼碑",
+      "batch": "民国影印摹刻·首批",
+      "originalStone": "西安碑林第二室",
+      "scanFingerprint": "sha256:1b8300e47f60",
+      "paper": "连史纸",
+      "rubber": "乌金拓",
+      "seals": "“吴湖帆”朱文印",
+      "notes": "外场新建档，请本机挂接"
+    },
+    {
+      "itemNo": "005",
+      "stableId": "TK-006",
+      "rubbingNo": "TK-006",
+      "title": "玄秘塔碑",
+      "batch": "清晚期摹刻·第四批",
+      "originalStone": "西安碑林第一室",
+      "scanFingerprint": "sha256:a40f7c92e1d3",
+      "paper": "皮纸",
+      "rubber": "蝉翼拓",
+      "seals": "无"
+    },
+    {
+      "itemNo": "006",
+      "stableId": "TK-002",
+      "rubbingNo": "BJT-2017-088",
+      "title": "多宝塔感应碑（重扫）",
+      "batch": "明中期摹刻·首批",
+      "originalStone": "西安碑林第一室",
+      "scanFingerprint": "sha256:41be77d8a2f7",
+      "paper": "棉连纸",
+      "rubber": "乌金拓",
+      "seals": "颜氏家藏半印",
+      "notes": "同一拓片号的第二次登记，编号不同不应错配"
+    }
+  ]
+}

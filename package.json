@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite --mode ssr",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "verify": "esbuild scripts/verify-reconcile.ts --bundle --platform=node --format=esm --outfile=node_modules/.verify.mjs && node node_modules/.verify.mjs",
+    "smoke:ssr": "vite build -c scripts/vite.smoke-build.config.ts >/dev/null 2>&1 && vite build -c scripts/vite.smoke-ssr.config.ts >/dev/null 2>&1 && node scripts/run-ssr-smoke.mjs; status=$?; rm -rf dist-smoke; exit $status"
   },
   "dependencies": {
     "@builder.io/qwik": "^1.20.1",

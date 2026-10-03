@@ -2,319 +2,421 @@ import {
   $, component$, useComputed$, useSignal, useStore, useVisibleTask$
 } from '@builder.io/qwik';
 import { Checkbox, Modal, Tabs } from '@qwik-ui/headless';
-import type { ArchiveRecord, ArchiveState, FieldKey, MatchCandidate, RecordGroup } from './types';
-import { computeMatches, fieldValue, scorePair } from './utils/matching';
+import type {
+  AppliedItem, ComparisonPackage, DeskState, Dispute, DisputeField, FieldState, RubbingRecord
+} from './types';
+import { DISPUTE_FIELDS, DISPUTE_LABELS } from './types';
+import {
+  importPackage, normalizePackage, renameLocalNo, resolveDispute, uid
+} from './utils/reconcile';
 import { seedState } from './data/seed';
 
-const STORAGE_KEY = 'sologsb-1020-archive-state-v1';
-const fieldLabels: Array<[FieldKey, string]> = [
-  ['title', '标题'], ['date', '日期'], ['people', '人物'], ['places', '地点'], ['identifier', '编号'],
-  ['medium', '载体'], ['extent', '数量'], ['rights', '权利'], ['notes', '备注']
-];
+const STORAGE_KEY = 'sologsb-1020-rubbing-desk-v2';
 
-const parseDate = (value: string) => {
-  if (/^\d{4}-\d{2}-\d{2}$/.test(value)) return value.split('-').reverse().join('/');
-  if (/^\d{4}$/.test(value)) return `${value}年`;
-  return value || '未知';
-};
+const FIELD_ACCENT: Record<DisputeField, string> = { paper: '#8a6a3f', rubber: '#3f7585', seals: '#8a4f63' };
 
-const recordById = (state: ArchiveState, id: string) => state.records.find((record) => record.id === id);
-const matchLabel = (state: ArchiveState, match: MatchCandidate) => {
-  const left = recordById(state, match.leftId);
-  const right = recordById(state, match.rightId);
-  return `${left?.title ?? '未知记录'} ↔ ${right?.title ?? '未知记录'}`;
-};
+const byStable = (state: DeskState, stableId: string) =>
+  state.records.find((record) => record.stableId === stableId);
+
+const fieldBadge = (fieldState: FieldState) =>
+  fieldState.confirmed ? '<已确认>' : fieldState.variants.length > 1 ? `并列${fieldState.variants.length}说` : fieldState.variants[0] ? '单值' : '缺录';
+
+interface ImportReport {
+  packageId: string;
+  packageVersion: number;
+  results: AppliedItem[];
+  skipped: number;
+  interrupted: boolean;
+  processedCount: number;
+  total: number;
+}
 
 export default component$(() => {
-  const state = useStore<ArchiveState>(seedState());
+  const state = useStore<DeskState>(seedState());
   const history = useSignal<string[]>([]);
   const future = useSignal<string[]>([]);
+
   const query = useSignal('');
-  const groupFilter = useSignal<'all' | RecordGroup>('all');
-  const statusFilter = useSignal<'all' | 'suggested' | 'confirmed' | 'rejected'>('all');
+  const fieldFilter = useSignal<'all' | DisputeField>('all');
   const visibleCount = useSignal(80);
-  const selectedMatchIds = useSignal<string[]>([]);
+  const selectedDisputeIds = useSignal<string[]>([]);
+
   const importOpen = useSignal(false);
-  const mergeOpen = useSignal(false);
-  const importGroup = useSignal<RecordGroup>('A');
   const importRaw = useSignal('');
-  const importText = useSignal('');
+  const importName = useSignal('');
+  const parsedPkg = useSignal<ComparisonPackage | null>(null);
+  const parseError = useSignal('');
+  const simulateFail = useSignal(false);
+  const failAfter = useSignal(3);
+  const importReport = useSignal<ImportReport | null>(null);
+
+  const resolveOpen = useSignal(false);
+  const activeDisputeId = useSignal('');
+  const chosenValue = useSignal('');
+
+  const renameOpen = useSignal(false);
+  const renameTargetId = useSignal('');
+  const renameValue = useSignal('');
+
   const toast = useSignal('');
   const panelTab = useSignal(0);
 
-  const snapshot = () => JSON.stringify({
+  // —— 撤销 / 重做 ——
+  const snapshot = $(() => JSON.stringify({
     revision: state.revision,
     records: state.records,
-    matches: state.matches,
-    merges: state.merges,
+    disputes: state.disputes,
+    importedItems: state.importedItems,
+    importBatches: state.importBatches,
     audit: state.audit
+  }));
+
+  const capture = $(async () => {
+    history.value = [...history.value.slice(-49), await snapshot()];
+    future.value = [];
   });
 
-  const capture = () => {
-    history.value = [...history.value.slice(-49), snapshot()];
-    future.value = [];
-  };
-
-  const restore = (raw: string) => {
-    const next = JSON.parse(raw) as Partial<ArchiveState>;
+  const restore = $(async (raw: string) => {
+    const next = JSON.parse(raw) as Partial<DeskState>;
     state.revision = next.revision ?? state.revision;
     state.records = next.records ?? state.records;
-    state.matches = next.matches ?? state.matches;
-    state.merges = next.merges ?? state.merges;
+    state.disputes = next.disputes ?? state.disputes;
+    state.importedItems = next.importedItems ?? state.importedItems;
+    state.importBatches = next.importBatches ?? state.importBatches;
     state.audit = next.audit ?? state.audit;
-  };
+  });
 
-  const notify = (message: string) => {
+  const notify = $((message: string) => {
     toast.value = message;
-    window.setTimeout(() => { if (toast.value === message) toast.value = ''; }, 2800);
-  };
+    window.setTimeout(() => { if (toast.value === message) toast.value = ''; }, 3200);
+  });
 
-  const commit = (action: string, detail: string, recordIds: string[] = []) => {
+  const commit = $((action: string, detail: string, stableIds: string[] = []) => {
     state.revision += 1;
-    state.audit.unshift({ id: crypto.randomUUID(), at: new Date().toISOString(), action, detail, recordIds });
-    state.audit = state.audit.slice(0, 300);
-  };
+    state.audit = [
+      { id: uid('aud'), at: new Date().toISOString(), action, detail, stableIds },
+      ...state.audit
+    ].slice(0, 400);
+  });
 
-  const undo = $(() => {
+  const undo = $(async () => {
     const raw = history.value.at(-1);
     if (!raw) return;
-    future.value = [...future.value, snapshot()];
+    future.value = [...future.value, await snapshot()];
     history.value = history.value.slice(0, -1);
-    restore(raw);
+    await restore(raw);
   });
 
-  const redo = $(() => {
+  const redo = $(async () => {
     const raw = future.value.at(-1);
     if (!raw) return;
-    history.value = [...history.value, snapshot()];
+    history.value = [...history.value, await snapshot()];
     future.value = future.value.slice(0, -1);
-    restore(raw);
+    await restore(raw);
   });
+
+  // —— 派生视图 ——
+  const pendingDisputes = useComputed$(() =>
+    state.disputes.filter((dispute) => dispute.status === 'pending'));
+
+  const visibleDisputes = useComputed$(() => pendingDisputes.value
+    .filter((dispute) => fieldFilter.value === 'all' || dispute.field === fieldFilter.value)
+    .sort((a, b) => a.stableId.localeCompare(b.stableId) || a.field.localeCompare(b.field)));
 
   const filteredRecords = useComputed$(() => {
     const term = query.value.trim().toLowerCase();
     return state.records
-      .filter((record) => groupFilter.value === 'all' || record.group === groupFilter.value)
-      .filter((record) => !term || [record.title, record.date, record.identifier, ...record.people, ...record.places].join(' ').toLowerCase().includes(term))
-      .sort((a, b) => a.group.localeCompare(b.group) || a.title.localeCompare(b.title, 'zh-CN'))
+      .filter((record) => !term || [
+        record.stableId, record.localNo, record.title, record.batch,
+        record.originalStone, ...record.aliases
+      ].join(' ').toLowerCase().includes(term))
+      .sort((a, b) => a.stableId.localeCompare(b.stableId))
       .slice(0, visibleCount.value);
   });
 
-  const filteredMatches = useComputed$(() => state.matches
-    .filter((match) => statusFilter.value === 'all' || match.status === statusFilter.value)
-    .sort((a, b) => b.score - a.score));
+  const confirmedCount = useComputed$(() =>
+    state.records.reduce((sum, record) =>
+      sum + DISPUTE_FIELDS.filter((field) => record[field].confirmed).length, 0));
 
-  const visibleMatches = useComputed$(() => filteredMatches.value.slice(0, 120));
-  const activeMatch = useComputed$(() => state.matches.find((match) => match.id === state.activeMatchId) ?? filteredMatches.value[0]);
-  const conflictCount = useComputed$(() => state.matches.filter((match) => match.status === 'suggested' && match.score < .68).length);
+  const pendingBatch = useComputed$(() =>
+    state.importBatches.find((batch) => batch.finishedAt === null) ?? null);
 
-  const updateMatch = $((id: string, status: MatchCandidate['status']) => {
-    capture();
-    const match = state.matches.find((item) => item.id === id);
-    if (!match) return;
-    match.status = status;
-    match.reviewedAt = new Date().toISOString();
-    state.records.forEach((record) => {
-      if ((record.id === match.leftId || record.id === match.rightId) && status === 'confirmed') record.status = 'confirmed';
-    });
-    commit(status === 'confirmed' ? '确认匹配' : '忽略可疑匹配', matchLabel(state, match), [match.leftId, match.rightId]);
-    notify(status === 'confirmed' ? '已确认此项匹配' : '已忽略此项匹配');
+  // —— 待裁项处理（确认前并列保留，确认后写回受保护结果） ——
+  const openResolve = $((dispute: Dispute) => {
+    activeDisputeId.value = dispute.id;
+    chosenValue.value = dispute.variants[0] ?? '';
+    resolveOpen.value = true;
   });
 
-  const bulkMatch = $((status: MatchCandidate['status']) => {
-    const ids = selectedMatchIds.value;
+  const applyResolve = $(async () => {
+    const dispute = state.disputes.find((item) => item.id === activeDisputeId.value);
+    const record = dispute ? byStable(state, dispute.stableId) : undefined;
+    if (!dispute || !record) return;
+    const value = chosenValue.value.trim();
+    if (!value) { await notify('请填写或选择确认值'); return; }
+    await capture();
+    const updated = resolveDispute(record, dispute.field, value, new Date().toISOString());
+    state.records = state.records.map((entry) => (entry.stableId === record.stableId ? updated : entry));
+    state.disputes = state.disputes.map((item) => item.id === dispute.id ? {
+      ...item, status: 'resolved' as const, resolvedAt: new Date().toISOString(), resolution: value
+    } : item);
+    await commit(
+      `裁定${DISPUTE_LABELS[dispute.field]}分歧`,
+      `《${record.title}》${DISPUTE_LABELS[dispute.field]}确认为“${value}”，并列候选 ${dispute.variants.length} 项仍留档`,
+      [record.stableId]
+    );
+    resolveOpen.value = false;
+    selectedDisputeIds.value = selectedDisputeIds.value.filter((id) => id !== dispute.id);
+    await notify(`已确认 ${DISPUTE_LABELS[dispute.field]}，此后回传不再覆盖该结果`);
+  });
+
+  const batchResolve = $(async () => {
+    const ids = selectedDisputeIds.value;
     if (!ids.length) return;
-    capture();
+    await capture();
+    let done = 0;
+    const touched = new Set<string>();
     ids.forEach((id) => {
-      const match = state.matches.find((item) => item.id === id);
-      if (!match) return;
-      match.status = status;
-      match.reviewedAt = new Date().toISOString();
+      const dispute = state.disputes.find((item) => item.id === id);
+      if (!dispute || dispute.status !== 'pending') return;
+      const record = byStable(state, dispute.stableId);
+      if (!record) return;
+      // 批量操作取该字段第一个并列候选作为确认值，逐条仍可在审计中追溯
+      const value = dispute.variants[0];
+      if (!value) return;
+      const updated = resolveDispute(record, dispute.field, value, new Date().toISOString());
+      state.records = state.records.map((entry) => (entry.stableId === record.stableId ? updated : entry));
+      state.disputes = state.disputes.map((item) => item.id === id ? {
+        ...item, status: 'resolved' as const, resolvedAt: new Date().toISOString(), resolution: value
+      } : item);
+      done += 1;
+      touched.add(record.stableId);
     });
-    commit('批量复核', `${ids.length} 条匹配被标记为${status === 'confirmed' ? '确认' : '忽略'}`, ids.flatMap((id) => {
-      const match = state.matches.find((item) => item.id === id);
-      return match ? [match.leftId, match.rightId] : [];
-    }));
-    selectedMatchIds.value = [];
-    notify(`已批量处理 ${ids.length} 条匹配`);
+    await commit('批量裁定待裁项', `按首列候选确认 ${done} 项纸张/拓工/钤印分歧`, [...touched]);
+    selectedDisputeIds.value = [];
+    await notify(`已批量裁定 ${done} 项`);
   });
 
-  const openMerge = $(() => {
-    const match = activeMatch.value;
-    if (!match) return;
-    state.activeMatchId = match.id;
-    fieldLabels.forEach(([field]) => {
-      const left = recordById(state, match.leftId);
-      const right = recordById(state, match.rightId);
-      if (left && right && fieldValue(left, field) === fieldValue(right, field)) choices[field] = 'A';
-      else choices[field] = 'A';
-    });
-    mergeOpen.value = true;
+  // —— 本机改编号 ——
+  const openRename = $((record: RubbingRecord) => {
+    renameTargetId.value = record.stableId;
+    renameValue.value = record.localNo;
+    renameOpen.value = true;
   });
 
-  const choices = useStore<Record<FieldKey, RecordGroup | 'combine'>>({
-    title: 'A', date: 'A', people: 'A', places: 'A', identifier: 'A', medium: 'A', extent: 'A', rights: 'A', notes: 'A'
+  const applyRename = $(async () => {
+    const record = byStable(state, renameTargetId.value);
+    if (!record) return;
+    const value = renameValue.value.trim();
+    if (!value || value === record.localNo) { renameOpen.value = false; return; }
+    await capture();
+    const updated = renameLocalNo(record, value, new Date().toISOString());
+    state.records = state.records.map((entry) => (entry.stableId === record.stableId ? updated : entry));
+    await commit('修改本机编号', `《${record.title}》本机编号 ${record.localNo} → ${value}，稳定编号 ${record.stableId} 不变，旧编号并入别名`, [record.stableId]);
+    renameOpen.value = false;
+    await notify('本机编号已改；回传仍按稳定编号挂回，不会错配');
   });
 
-  const mergeCurrent = $(() => {
-    const match = activeMatch.value;
-    if (!match) return;
-    const left = recordById(state, match.leftId);
-    const right = recordById(state, match.rightId);
-    if (!left || !right) return;
-    capture();
-    const values: Partial<Record<FieldKey, string>> = {};
-    fieldLabels.forEach(([field]) => {
-      const source = choices[field];
-      const pick = source === 'combine' ? `${fieldValue(left, field)}；${fieldValue(right, field)}` : fieldValue(source === 'A' ? left : right, field);
-      values[field] = pick;
-    });
-    const merged: ArchiveRecord = {
-      ...left,
-      ...values,
-      people: values.people?.split(/[；、,，]/).map((item) => item.trim()).filter(Boolean) ?? left.people,
-      places: values.places?.split(/[；、,，]/).map((item) => item.trim()).filter(Boolean) ?? left.places,
-      status: 'merged',
-      updatedAt: new Date().toISOString()
-    };
-    state.records = [...state.records.filter((record) => record.id !== left.id && record.id !== right.id), merged];
-    state.matches.forEach((item) => {
-      if (item.id === match.id) item.status = 'merged';
-      else if (item.leftId === left.id || item.rightId === right.id || item.leftId === right.id || item.rightId === left.id) item.status = 'rejected';
-    });
-    state.merges.unshift({
-      id: crypto.randomUUID(),
-      matchId: match.id,
-      leftId: left.id,
-      rightId: right.id,
-      chosen: { ...choices },
-      values,
-      mergedAt: new Date().toISOString()
-    });
-    commit('合并两条记录', `保留 ${Object.values(choices).filter((choice) => choice === 'A').length} 个 A 来源字段、${Object.values(choices).filter((choice) => choice === 'B').length} 个 B 来源字段`, [left.id, right.id, merged.id]);
-    mergeOpen.value = false;
-    notify('记录已合并，来源与字段选择已写入审计记录');
-  });
-
-  const parseImport = $(() => {
+  // —— 导入解析 ——
+  const parsePkg = $(() => {
+    parseError.value = '';
+    parsedPkg.value = null;
     const raw = importRaw.value.trim();
     if (!raw) return;
-    let rows: Array<Partial<ArchiveRecord>> = [];
     try {
-      if (raw.startsWith('[')) rows = JSON.parse(raw) as Array<Partial<ArchiveRecord>>;
-      else {
-        const lines = raw.split(/\r?\n/).filter(Boolean);
-        rows = lines.map((line, index) => {
-          const cells = line.split(/\t|\|/).map((cell) => cell.trim());
-          return {
-            title: cells[0] || `未命名记录 ${index + 1}`,
-            date: cells[1] || '',
-            people: (cells[2] || '').split(/[，,、]/).filter(Boolean),
-            places: (cells[3] || '').split(/[，,、]/).filter(Boolean),
-            identifier: cells[4] || '',
-            medium: cells[5] || '',
-            extent: cells[6] || '',
-            rights: cells[7] || '',
-            notes: cells[8] || ''
-          };
-        });
-      }
+      const pkg = normalizePackage(JSON.parse(raw));
+      if (!pkg.items.length) { parseError.value = '包内没有可导入的拓片条目（缺少稳定编号的条目会被忽略）'; return; }
+      parsedPkg.value = pkg;
     } catch {
-      notify('导入内容格式不正确，请使用 JSON 数组或制表符分隔文本');
-      return;
+      parseError.value = '无法解析 JSON，请检查比对包文件格式';
     }
-    if (!rows.length) return;
-    capture();
-    rows.forEach((row) => {
-      const record: ArchiveRecord = {
-        id: crypto.randomUUID(),
-        group: importGroup.value,
-        title: row.title || '未命名记录',
-        date: row.date || '',
-        people: Array.isArray(row.people) ? row.people : String(row.people || '').split(/[，,、]/).filter(Boolean),
-        places: Array.isArray(row.places) ? row.places : String(row.places || '').split(/[，,、]/).filter(Boolean),
-        identifier: row.identifier || '',
-        medium: row.medium || '',
-        extent: row.extent || '',
-        rights: row.rights || '',
-        notes: row.notes || '',
-        updatedAt: new Date().toISOString(),
-        status: 'unreviewed'
-      };
-      state.records.push(record);
-    });
-    state.matches = computeMatches(state.records);
-    commit('导入档案记录', `从 ${importGroup.value} 组导入 ${rows.length} 条记录`, []);
-    importRaw.value = '';
-    importText.value = '';
-    importOpen.value = false;
-    notify(`已导入 ${rows.length} 条记录并重新匹配`);
   });
 
-  const importFile = $(async (_event: Event, element: HTMLInputElement) => {
+  const readFile = $(async (_event: Event, element: HTMLInputElement) => {
     const file = element.files?.[0];
     if (!file) return;
     importRaw.value = await file.text();
-    importText.value = file.name;
+    importName.value = file.name;
+    await parsePkg();
   });
 
-  const exportAudit = $(() => {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), records: state.records, matches: state.matches, merges: state.merges, audit: state.audit }, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
-    anchor.href = url;
-    anchor.download = `档案元数据核对结果-${new Date().toISOString().slice(0, 10)}.json`;
-    anchor.click();
-    URL.revokeObjectURL(url);
-  });
+  // 真正执行导入；续传时 opts 传入此前已处理的 key，不重复建档
+  const runImport = $(async (resumeKeys?: string[]) => {
+    const pkg = parsedPkg.value;
+    if (!pkg) return;
+    await capture();
+    const outcome = importPackage(
+      {
+        records: state.records,
+        disputes: state.disputes,
+        importedItems: state.importedItems,
+        importBatches: state.importBatches
+      },
+      pkg,
+      {
+        processedKeys: resumeKeys,
+        // 勾选“模拟写入中断”且是该包首次导入时，处理到第 N 条中断以保留进度
+        failAfter: simulateFail.value && !resumeKeys ? failAfter.value : undefined
+      }
+    );
+    state.records = outcome.records;
+    state.disputes = outcome.disputes;
+    state.importedItems = outcome.importedItems;
+    state.importBatches = [
+      outcome.batch,
+      ...state.importBatches.filter((batch) => batch.packageId !== pkg.packageId)
+    ];
 
-  const moveReview = $((delta: number) => {
-    const list = filteredMatches.value;
-    const index = list.findIndex((match) => match.id === activeMatch.value?.id);
-    const next = list[Math.max(0, Math.min(list.length - 1, index + delta))];
-    if (next) {
-      state.activeMatchId = next.id;
-      document.querySelector(`[data-match-id="${next.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const created = outcome.results.filter((r) => r.created).length;
+    const matched = outcome.results.length - created;
+    const newDisputes = outcome.results.flatMap((r) => r.newDisputes);
+    const blocked = outcome.results.filter((r) => r.blockedFields.length);
+    const fpMismatch = outcome.results.filter((r) => r.fingerprintMismatch);
+
+    const details: string[] = [];
+    details.push(`挂回已有记录 ${matched} 件、新建档 ${created} 件`);
+    if (outcome.skipped) details.push(`重试跳过已处理条目 ${outcome.skipped} 条（未重复建档）`);
+    if (newDisputes.length) details.push(`新增待裁项 ${newDisputes.length} 项，纸张/拓工/钤印分歧已并列保留`);
+    if (blocked.length) details.push(`${blocked.length} 件的已确认字段受保护，未被覆盖（${blocked.flatMap((r) => r.blockedFields.map((f) => DISPUTE_LABELS[f])).join('、')}）`);
+    if (fpMismatch.length) details.push(`扫描指纹不一致 ${fpMismatch.length} 件，仅提示不改写`);
+    if (pkg.packageVersion < 2) details.push(`旧版包 v${pkg.packageVersion} 已按兼容规则迁移导入`);
+
+    await commit(
+      outcome.interrupted ? '回传导入（中断，进度已保留）' : '回传导入比对包',
+      `${pkg.packageId}：${details.join('；')}`,
+      outcome.results.map((r) => r.stableId)
+    );
+
+    importReport.value = {
+      packageId: pkg.packageId,
+      packageVersion: pkg.packageVersion,
+      results: outcome.results,
+      skipped: outcome.skipped,
+      interrupted: outcome.interrupted,
+      processedCount: outcome.processedCount,
+      total: outcome.batch.totalItems
+    };
+
+    if (outcome.interrupted) {
+      await notify(`写入中断：已保留前 ${outcome.results.length} 条进度，可再次选择同一包“续传”`);
+    } else {
+      await notify(`导入完成：挂回 ${matched} 件、新建 ${created} 件，跳过 ${outcome.skipped} 条`);
     }
   });
 
-  useVisibleTask$(() => {
+  const resumeImport = $(async () => {
+    const batch = state.importBatches.find((b) => b.packageId === parsedPkg.value?.packageId);
+    await runImport(batch?.processedKeys ?? []);
+  });
+
+  const closeImport = $(() => {
+    // 中断时保留已解析包，方便直接续传；完成后清空
+    const interruptedHere = importReport.value?.interrupted;
+    importOpen.value = false;
+    if (!interruptedHere) {
+      importRaw.value = '';
+      importName.value = '';
+      parsedPkg.value = null;
+      importReport.value = null;
+      parseError.value = '';
+    }
+  });
+
+  // —— 导出回执包：待裁项处理完才允许更新导出包 ——
+  const exportReceipt = $(async () => {
+    if (pendingDisputes.value.length) {
+      await notify(`仍有 ${pendingDisputes.value.length} 项待裁，请处理完再更新导出包`);
+      panelTab.value = 0;
+      return;
+    }
+    const payload = {
+      kind: 'rubbing-version-receipt',
+      receiptVersion: 2,
+      exportedAt: new Date().toISOString(),
+      stateRevision: state.revision,
+      pendingDisputeCount: 0,
+      records: state.records.map((record) => ({
+        stableId: record.stableId,
+        localNo: record.localNo,
+        title: record.title,
+        batch: record.batch,
+        originalStone: record.originalStone,
+        scanFingerprint: record.scanFingerprint,
+        paper: record.paper,
+        rubber: record.rubber,
+        seals: record.seals,
+        notes: record.notes,
+        updatedAt: record.updatedAt
+      })),
+      resolvedDisputes: state.disputes
+        .filter((dispute) => dispute.status === 'resolved')
+        .map((dispute) => ({
+          id: dispute.id, stableId: dispute.stableId, field: dispute.field,
+          resolution: dispute.resolution, resolvedAt: dispute.resolvedAt
+        })),
+      audit: state.audit
+    };
+    const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = `碑帖拓片版本回执-r${state.revision}-${new Date().toISOString().slice(0, 10)}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
+    await commit('导出回执包', `按 r${state.revision} 导出版本回执，含 ${state.records.length} 件记录与全部裁定结果`, state.records.map((r) => r.stableId));
+    await notify('回执包已导出');
+  });
+
+  // —— 本地离线保存（写入即持久化，天然支持中断续传） ——
+  useVisibleTask$(async () => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (raw) {
-        const saved = JSON.parse(raw) as Partial<ArchiveState>;
-        restore(JSON.stringify(saved));
-      }
+      if (raw) await restore(raw);
     } catch {
       localStorage.removeItem(STORAGE_KEY);
     }
     state.hydrated = true;
   });
 
-  useVisibleTask$(({ track }) => {
-    const payload = track(() => JSON.stringify({ revision: state.revision, records: state.records, matches: state.matches, merges: state.merges, audit: state.audit }));
-    if (state.hydrated) localStorage.setItem(STORAGE_KEY, payload);
+  useVisibleTask$(async ({ track }) => {
+    track(() => state.revision);
+    if (!state.hydrated) return;
+    const payload = await snapshot();
+    try {
+      localStorage.setItem(STORAGE_KEY, payload);
+    } catch {
+      await notify('本地存储空间不足，进度可能未完全保存');
+    }
   });
 
+  // —— 键盘密集审核 ——
   useVisibleTask$(({ cleanup }) => {
     const handler = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement;
       const editing = /INPUT|TEXTAREA|SELECT/.test(target.tagName) || target.isContentEditable;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'z') {
         event.preventDefault();
-        event.shiftKey ? redo() : undo();
+        event.shiftKey ? void redo() : void undo();
         return;
       }
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); redo(); return; }
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'y') { event.preventDefault(); void redo(); return; }
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'i') { event.preventDefault(); importOpen.value = true; return; }
       if (editing) return;
       const key = event.key.toLowerCase();
-      if (key === 'j') { event.preventDefault(); moveReview(1); }
-      if (key === 'k') { event.preventDefault(); moveReview(-1); }
-      if (event.key === 'Enter' && activeMatch.value) { event.preventDefault(); openMerge(); }
-      if (key === 'c' && activeMatch.value) { event.preventDefault(); updateMatch(activeMatch.value.id, 'confirmed'); }
-      if (key === 'r' && activeMatch.value) { event.preventDefault(); updateMatch(activeMatch.value.id, 'rejected'); }
-      if (key === '?' || (event.shiftKey && event.key === '/')) { event.preventDefault(); panelTab.value = 2; }
+      if (key === 'j' || key === 'k') {
+        event.preventDefault();
+        const list = visibleDisputes.value;
+        const index = list.findIndex((dispute) => dispute.id === activeDisputeId.value);
+        const next = list[Math.max(0, Math.min(list.length - 1, index + (key === 'j' ? 1 : -1)))];
+        if (next) {
+          activeDisputeId.value = next.id;
+          document.querySelector(`[data-dispute-id="${next.id}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+      }
+      if (key === 'x' && activeDisputeId.value) {
+        const dispute = state.disputes.find((item) => item.id === activeDisputeId.value);
+        if (dispute && dispute.status === 'pending') void openResolve(dispute);
+      }
     };
     window.addEventListener('keydown', handler);
     cleanup(() => window.removeEventListener('keydown', handler));
@@ -324,191 +426,358 @@ export default component$(() => {
     <div class="app-shell">
       <header class="topbar">
         <div class="brand">
-          <div class="brand-seal">档</div>
-          <div><h1>档案元数据核对台</h1><p>ARCHIVE RECONCILIATION DESK</p></div>
+          <div class="brand-seal">拓</div>
+          <div><h1>碑帖拓片版本比对台</h1><p>RUBBING VERSION RECONCILIATION DESK</p></div>
         </div>
         <div class="top-stat"><span class="online-dot" />{state.hydrated ? `离线保存 · r${state.revision}` : '正在恢复本地工作区'}</div>
         <div class="top-actions">
           <button class="icon-button" disabled={!history.value.length} onClick$={undo}>撤销</button>
           <button class="icon-button" disabled={!future.value.length} onClick$={redo}>重做</button>
-          <button class="button ghost" onClick$={() => importOpen.value = true}>导入两组记录</button>
-          <button class="button light" onClick$={exportAudit}>导出核对包</button>
+          <button class="button ghost" onClick$={() => { importReport.value = null; importOpen.value = true; }}>回传导入比对包</button>
+          <button class={`button ${pendingDisputes.value.length ? 'light' : 'primary'}`} onClick$={exportReceipt}>
+            {pendingDisputes.value.length ? `导出被待裁项阻塞（${pendingDisputes.value.length}）` : '更新导出回执包'}
+          </button>
         </div>
       </header>
 
       <div class="overview">
-        <div><span class="eyebrow">RECONCILIATION PROJECT</span><h2>口述史与手稿元数据比对</h2><p>逐条确认可疑匹配，保留每个字段的来源选择，并留下可追溯的处理记录。</p></div>
+        <div>
+          <span class="eyebrow">STELA RUBBING · VERSION LEDGER</span>
+          <h2>外场回传 · 版本对账</h2>
+          <p>以拓片号稳定挂回原记录；纸张、拓工、钤印有分歧时并列保留，确认后受保护；写入中断可续传，重试不重复建档。</p>
+        </div>
         <div class="metrics">
-          <div><strong>{state.records.filter((record) => record.group === 'A').length}</strong><span>A 组记录</span></div>
-          <div><strong>{state.records.filter((record) => record.group === 'B').length}</strong><span>B 组记录</span></div>
-          <div><strong>{state.matches.filter((match) => match.status === 'suggested').length}</strong><span>待复核匹配</span></div>
-          <div class="danger"><strong>{conflictCount.value}</strong><span>低分可疑项</span></div>
+          <div><strong>{state.records.length}</strong><span>在台账拓片</span></div>
+          <div class={pendingDisputes.value.length ? 'danger' : ''}><strong>{pendingDisputes.value.length}</strong><span>待裁项</span></div>
+          <div><strong>{confirmedCount.value}</strong><span>已确认字段</span></div>
+          <div><strong>{state.importBatches.length}</strong><span>历史导入包</span></div>
         </div>
       </div>
 
+      {pendingBatch.value && (
+        <div class="resume-banner">
+          <span>检测到未完成导入：{pendingBatch.value.packageId}（已处理 {pendingBatch.value.processedKeys.length}/{pendingBatch.value.totalItems} 条，进度已保留）。</span>
+          <button class="button small" onClick$={() => { importOpen.value = true; }}>选择同一包续传</button>
+        </div>
+      )}
+
       <main class="desk-grid">
-        <section class="panel match-panel">
+        {/* 待裁项队列 */}
+        <section class="panel dispute-panel">
           <div class="panel-heading">
-            <div><span class="eyebrow">01 / MATCH QUEUE</span><h3>匹配核对队列</h3></div>
-            <span class="shortcut-hint">J / K 移动 · Enter 合并</span>
+            <div><span class="eyebrow">01 / PENDING DECISIONS</span><h3>待裁项队列</h3></div>
+            <span class="shortcut-hint">J / K 移动 · X 裁定</span>
           </div>
           <div class="toolbar-row">
-            <select class="input" value={statusFilter.value} onChange$={(event) => { statusFilter.value = (event.target as HTMLSelectElement).value as typeof statusFilter.value; }}>
-              <option value="all">全部匹配</option><option value="suggested">待复核</option><option value="confirmed">已确认</option><option value="rejected">已忽略</option>
+            <select class="input" value={fieldFilter.value} onChange$={(event) => { fieldFilter.value = (event.target as HTMLSelectElement).value as typeof fieldFilter.value; }}>
+              <option value="all">纸张 / 拓工 / 钤印</option>
+              <option value="paper">纸张</option>
+              <option value="rubber">拓工</option>
+              <option value="seals">钤印</option>
             </select>
-            <button class="button small" disabled={!selectedMatchIds.value.length} onClick$={() => bulkMatch('confirmed')}>批量确认</button>
-            <button class="button small ghost" disabled={!selectedMatchIds.value.length} onClick$={() => bulkMatch('rejected')}>批量忽略</button>
+            <button class="button small" disabled={!selectedDisputeIds.value.length} onClick$={batchResolve}>批量取首项确认</button>
           </div>
-          <div class="match-list">
-            {visibleMatches.value.map((match) => {
-              const left = recordById(state, match.leftId);
-              const right = recordById(state, match.rightId);
-              const isActive = () => state.activeMatchId === match.id;
+          <div class="dispute-list">
+            {visibleDisputes.value.map((dispute) => {
+              const record = byStable(state, dispute.stableId);
+              const isActive = activeDisputeId.value === dispute.id;
               return (
                 <article
-                  data-match-id={match.id}
-                  class={`match-card ${isActive() ? 'active' : ''}`}
-                  onClick$={() => { state.activeMatchId = match.id; }}
+                  key={dispute.id}
+                  data-dispute-id={dispute.id}
+                  class={`dispute-card ${isActive ? 'active' : ''}`}
+                  onClick$={() => { activeDisputeId.value = dispute.id; }}
                   tabIndex={0}
                 >
-                  <div class="match-topline">
+                  <div class="dispute-top">
                     <Checkbox.Root
                       class="qwik-check"
-                      aria-label={`选择匹配 ${match.id}`}
-                      initialValue={selectedMatchIds.value.includes(match.id)}
+                      aria-label="选择待裁项"
+                      initialValue={selectedDisputeIds.value.includes(dispute.id)}
                       onClick$={(event: Event) => {
                         event.stopPropagation();
-                        selectedMatchIds.value = selectedMatchIds.value.includes(match.id)
-                          ? selectedMatchIds.value.filter((id) => id !== match.id)
-                          : [...selectedMatchIds.value, match.id];
+                        selectedDisputeIds.value = selectedDisputeIds.value.includes(dispute.id)
+                          ? selectedDisputeIds.value.filter((id) => id !== dispute.id)
+                          : [...selectedDisputeIds.value, dispute.id];
                       }}
                     ><Checkbox.Indicator>✓</Checkbox.Indicator></Checkbox.Root>
-                    <span class={`score ${match.score < .68 ? 'low' : ''}`}>{Math.round(match.score * 100)}%</span>
-                    <span class={`status ${match.status}`}>{match.status === 'suggested' ? '待复核' : match.status === 'confirmed' ? '已确认' : match.status === 'rejected' ? '已忽略' : '已合并'}</span>
-                    <span class="record-id">{left?.identifier}</span>
+                    <span class="dispute-field" style={`background:${FIELD_ACCENT[dispute.field]}`}>{DISPUTE_LABELS[dispute.field]}</span>
+                    <code class="stable-id">{dispute.stableId}</code>
+                    <button class="button small primary decide-btn" onClick$={() => openResolve(dispute)}>裁定</button>
                   </div>
-                  <div class="pair-preview">
-                    <div><small>A · {left?.group}</small><strong>{left?.title}</strong><span>{parseDate(left?.date ?? '')} · {left?.people.join('、')}</span></div>
-                    <i>↔</i>
-                    <div><small>B · {right?.group}</small><strong>{right?.title}</strong><span>{parseDate(right?.date ?? '')} · {right?.people.join('、')}</span></div>
+                  <strong class="dispute-title">{record?.title ?? dispute.stableId}</strong>
+                  <div class="variant-row">
+                    {dispute.variants.map((value) => (
+                      <span key={value} class="variant-pill">{value}</span>
+                    ))}
                   </div>
-                  <div class="reason-line">{match.reasons.join(' · ')}</div>
+                  <p class="dispute-note">并列保留中，确认前任一候选都不会被覆盖</p>
                 </article>
               );
             })}
-            {!visibleMatches.value.length && <div class="empty-state">没有符合当前筛选条件的匹配。</div>}
+            {!visibleDisputes.value.length && (
+              <div class="empty-state">没有待裁项。<br />纸张 / 拓工 / 钤印出现新分歧时会自动进入此队列。</div>
+            )}
           </div>
         </section>
 
-        <section class="panel records-panel">
+        {/* 拓片台账 */}
+        <section class="panel ledger-panel">
           <div class="panel-heading">
-            <div><span class="eyebrow">02 / RECORD INDEX</span><h3>档案记录索引</h3></div>
-            <span class="shortcut-hint">分页渲染 · 当前 {filteredRecords.value.length} 条</span>
+            <div><span class="eyebrow">02 / RUBBING LEDGER</span><h3>拓片台账（稳定编号挂接）</h3></div>
+            <span class="shortcut-hint">分页渲染 · 当前 {filteredRecords.value.length} 件</span>
           </div>
           <div class="toolbar-row">
-            <input class="input search" placeholder="搜索标题、日期、人物、地点或编号" value={query.value} onInput$={(event) => { query.value = (event.target as HTMLInputElement).value; visibleCount.value = 80; }} />
-            <select class="input compact" value={groupFilter.value} onChange$={(event) => { groupFilter.value = (event.target as HTMLSelectElement).value as typeof groupFilter.value; visibleCount.value = 80; }}>
-              <option value="all">A + B</option><option value="A">A 组</option><option value="B">B 组</option>
-            </select>
+            <input
+              class="input search"
+              placeholder="搜索拓片号 / 本机编号 / 别名 / 名称 / 批次"
+              value={query.value}
+              onInput$={(event) => { query.value = (event.target as HTMLInputElement).value; visibleCount.value = 80; }}
+            />
           </div>
-          <div class="record-table">
-            <div class="table-head"><span>来源</span><span>标题</span><span>日期 / 人物 / 地点</span><span>编号</span><span>状态</span></div>
-            {filteredRecords.value.map((record) => (
-              <div class="table-row" key={record.id}>
-                <span class={`group-badge ${record.group.toLowerCase()}`}>{record.group}</span>
-                <strong>{record.title}</strong>
-                <span>{parseDate(record.date)}<small>{record.people.join('、')} · {record.places.join('、')}</small></span>
-                <code>{record.identifier}</code>
-                <span class={`record-status ${record.status}`}>{record.status === 'unreviewed' ? '未核对' : record.status === 'confirmed' ? '已确认' : record.status === 'rejected' ? '已忽略' : '已合并'}</span>
-              </div>
-            ))}
+          <div class="ledger-list">
+            {filteredRecords.value.map((record) => {
+              const pending = state.disputes.some((d) => d.stableId === record.stableId && d.status === 'pending');
+              return (
+                <article class="ledger-card" key={record.stableId}>
+                  <div class="ledger-head">
+                    <code class="stable-id strong">{record.stableId}</code>
+                    <span class={`lock-dot ${pending ? 'pending' : 'allclear'}`} title={pending ? '存在待裁项' : '字段均已确认或单值'} />
+                    <strong class="ledger-title">{record.title}</strong>
+                    <button class="rename-btn" onClick$={() => openRename(record)} title="修改本机编号（不影响稳定编号）">改编号</button>
+                  </div>
+                  <div class="ledger-meta">
+                    <span>本机编号 <b>{record.localNo}</b></span>
+                    {record.aliases.length > 0 && <span class="aliases">曾用/外场编号 {record.aliases.map((a) => <code>{a}</code>)}</span>}
+                  </div>
+                  <div class="ledger-meta"><span>摹刻批次 {record.batch}</span><span>原石 {record.originalStone}</span></div>
+                  <div class="fingerprint-row">
+                    <span>指纹 {record.scanFingerprint || '—'}</span>
+                    <span class="last-import">{record.lastImportItemNo ? `最近挂接条目 ${record.lastImportItemNo}` : '尚未经回传挂接'}</span>
+                  </div>
+                  <div class="field-grid">
+                    {DISPUTE_FIELDS.map((f) => {
+                      const fs = record[f];
+                      return (
+                        <div class={`field-cell ${fs.confirmed ? 'confirmed' : fs.variants.length > 1 ? 'multi' : ''}`} key={f}>
+                          <small>{DISPUTE_LABELS[f]} · {fieldBadge(fs)}</small>
+                          {fs.variants.map((v) => (
+                            <span key={v} class={fs.confirmed && fs.chosen === v ? 'chosen' : fs.confirmed ? 'dropped' : ''}>{v}</span>
+                          ))}
+                          {!fs.variants.length && <em>缺录</em>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                </article>
+              );
+            })}
           </div>
-          {filteredRecords.value.length >= visibleCount.value && <button class="load-more" onClick$={() => visibleCount.value += 80}>加载下 80 条记录</button>}
+          {filteredRecords.value.length >= visibleCount.value && (
+            <button class="load-more" onClick$={() => visibleCount.value += 80}>加载下 80 件</button>
+          )}
         </section>
 
-        <section class="panel review-panel">
+        {/* 右侧：审计 / 导入履历 / 帮助 */}
+        <section class="panel side-panel">
           <Tabs.Root bind:selectedIndex={panelTab} class="review-tabs">
-            <Tabs.List class="tab-list"><Tabs.Tab>复核详情</Tabs.Tab><Tabs.Tab>合并追溯</Tabs.Tab><Tabs.Tab>键盘帮助</Tabs.Tab></Tabs.List>
+            <Tabs.List class="tab-list">
+              <Tabs.Tab>审计轨迹</Tabs.Tab><Tabs.Tab>导入履历</Tabs.Tab><Tabs.Tab>规则与键位</Tabs.Tab>
+            </Tabs.List>
+
             <Tabs.Panel class="tab-panel">
-              {activeMatch.value ? (() => {
-                const left = recordById(state, activeMatch.value!.leftId)!;
-                const right = recordById(state, activeMatch.value!.rightId)!;
-                return <>
-                  <div class="active-score"><span>{Math.round(activeMatch.value!.score * 100)}</span><div><strong>综合匹配分</strong><small>{activeMatch.value!.reasons.join(' · ')}</small></div></div>
-                  <div class="field-compare compact"><div class="field-label">字段</div><div>A 来源</div><div>B 来源</div>
-                    {fieldLabels.map(([field, label]) => <><div class="field-label">{label}</div><div class={fieldValue(left, field) !== fieldValue(right, field) ? 'different' : ''}>{fieldValue(left, field) || '—'}</div><div class={fieldValue(left, field) !== fieldValue(right, field) ? 'different' : ''}>{fieldValue(right, field) || '—'}</div></>)}
+              <div class="audit-list">
+                {state.audit.map((entry) => (
+                  <div class="audit-entry" key={entry.id}>
+                    <time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time>
+                    <div><strong>{entry.action}</strong><p>{entry.detail}</p></div>
+                    <span>{entry.stableIds.length ? `${entry.stableIds.length} 件` : '系统'}</span>
                   </div>
-                  <div class="action-stack"><button class="button primary wide" onClick$={openMerge}>逐字段合并</button><div class="split-actions"><button class="button confirm" onClick$={() => updateMatch(activeMatch.value!.id, 'confirmed')}>确认匹配</button><button class="button ghost" onClick$={() => updateMatch(activeMatch.value!.id, 'rejected')}>忽略</button></div></div>
-                </>;
-              })() : <div class="empty-state">从左侧选择一条匹配查看字段来源。</div>}
+                ))}
+              </div>
             </Tabs.Panel>
+
             <Tabs.Panel class="tab-panel">
-              {state.merges.length ? state.merges.map((merge) => {
-                const left = recordById(state, merge.leftId);
-                const right = recordById(state, merge.rightId);
-                return <details class="merge-log" key={merge.id}><summary>{left?.title ?? merge.leftId} ↔ {right?.title ?? merge.rightId}</summary><p>{new Date(merge.mergedAt).toLocaleString('zh-CN')}</p><ul>{Object.entries(merge.chosen).map(([field, choice]) => <li key={field}><strong>{fieldLabels.find(([key]) => key === field)?.[1]}</strong><span>保留 {choice === 'A' ? 'A 来源' : choice === 'B' ? 'B 来源' : '双来源拼接'}：{merge.values[field as FieldKey]}</span></li>)}</ul></details>;
-              }) : <div class="empty-state">还没有合并记录。完成一次字段合并后，来源选择会出现在这里。</div>}
+              <div class="batch-list">
+                {state.importBatches.length === 0 && <div class="empty-state">还没有导入过比对包。</div>}
+                {state.importBatches.map((batch) => (
+                  <div class={`batch-card ${batch.finishedAt ? '' : 'open'}`} key={batch.packageId}>
+                    <div class="batch-head">
+                      <code>{batch.packageId}</code>
+                      <span class={`status ${batch.finishedAt ? 'confirmed' : 'suggested'}`}>
+                        {batch.finishedAt ? '已完成' : '中断待续传'}
+                      </span>
+                    </div>
+                    <p>包版本 v{batch.packageVersion}{batch.packageVersion < 2 ? '（旧版兼容导入）' : ''}</p>
+                    <div class="progress"><i style={`width:${Math.round((batch.processedKeys.length / Math.max(1, batch.totalItems)) * 100)}%`} /></div>
+                    <small>{batch.processedKeys.length}/{batch.totalItems} 条目已落盘 · 重试同包自动跳过</small>
+                  </div>
+                ))}
+              </div>
             </Tabs.Panel>
-            <Tabs.Panel class="tab-panel shortcut-panel">
-              <div><kbd>J / K</kbd><span>下一条 / 上一条可疑匹配</span></div><div><kbd>Enter</kbd><span>打开逐字段合并窗口</span></div><div><kbd>C / R</kbd><span>确认 / 忽略当前匹配</span></div><div><kbd>Ctrl + Z / Y</kbd><span>撤销 / 重做</span></div><div><kbd>Ctrl + I</kbd><span>打开导入窗口</span></div><div><kbd>Ctrl/⌘ + Enter</kbd><span>在导入框中提交记录</span></div>
+
+            <Tabs.Panel class="tab-panel rules-panel">
+              <div class="rule-row"><span>1</span><p>只按<b>拓片号（稳定编号）</b>挂回原记录；本机改编号只动本机号，旧号自动入别名，回传不会错配。</p></div>
+              <div class="rule-row"><span>2</span><p>纸张 / 拓工 / 钤印出现分歧时<b>并列保留</b>全部候选；确认前不覆盖任何值。</p></div>
+              <div class="rule-row"><span>3</span><p>字段一旦<b>确认</b>即加锁，之后的回传值被挡下并写入审计，不覆盖已确认结果。</p></div>
+              <div class="rule-row"><span>4</span><p>同一包按 <code>包号:条目号</code> 幂等；写入中断保留已处理进度，重试跳过已建档条目。</p></div>
+              <div class="rule-row"><span>5</span><p>旧版包（中文字段 / 无版本号）自动归一化迁移导入。</p></div>
+              <div class="rule-row"><span>6</span><p><b>待裁项清零后</b>才允许更新导出回执包。扫描指纹仅核对提示，不改写数据。</p></div>
+              <hr />
+              <div class="shortcut-grid">
+                <div><kbd>J / K</kbd><span>下一条 / 上一条待裁项</span></div>
+                <div><kbd>X</kbd><span>裁定当前待裁项</span></div>
+                <div><kbd>Ctrl + I</kbd><span>打开回传导入</span></div>
+                <div><kbd>Ctrl + Z / Y</kbd><span>撤销 / 重做</span></div>
+              </div>
             </Tabs.Panel>
           </Tabs.Root>
         </section>
       </main>
 
-      <section class="bottom-grid">
-        <article class="panel audit-panel">
-          <div class="panel-heading"><div><span class="eyebrow">03 / TRACE</span><h3>最新处理记录</h3></div><span>{state.audit.length} 条</span></div>
-          <div class="audit-list">
-            {state.audit.slice(0, 8).map((entry) => <div class="audit-entry" key={entry.id}><time>{new Date(entry.at).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time><div><strong>{entry.action}</strong><p>{entry.detail}</p></div><span>{entry.recordIds.length ? `${entry.recordIds.length} 条记录` : '系统'}</span></div>)}
-          </div>
-        </article>
-        <article class="panel explanation-panel">
-          <div class="panel-heading"><div><span class="eyebrow">METHOD</span><h3>匹配与保护规则</h3></div></div>
-          <p>标题、日期、人物、地点和编号按权重综合评分。低于 68% 的候选会以红色标记，但系统不会替研究者自动决定。</p>
-          <div class="rule-row"><span>1</span><p>每个字段保留 A / B 来源，可在合并窗口中单独选择或拼接。</p></div>
-          <div class="rule-row"><span>2</span><p>原始记录、合并结果和忽略理由都进入本地审计轨迹。</p></div>
-          <div class="rule-row"><span>3</span><p>记录列表使用分批窗口渲染，导入大量数据时仍只挂载当前窗口。</p></div>
-        </article>
-      </section>
-
       {toast.value && <div class="toast">{toast.value}</div>}
 
-      <Modal.Root bind:show={importOpen} closeOnBackdropClick>
+      {/* 回传导入 */}
+      <Modal.Root bind:show={importOpen} closeOnBackdropClick={false}>
         <Modal.Panel class="modal-panel import-modal">
-          <Modal.Header class="modal-header"><div><span class="eyebrow">IMPORT</span><Modal.Title>导入一组档案记录</Modal.Title></div><Modal.Close class="modal-close">×</Modal.Close></Modal.Header>
-          <Modal.Description class="modal-description">支持 JSON 数组或制表符 / 竖线分隔文本。字段顺序：标题、日期、人物、地点、编号、载体、数量、权利、备注。</Modal.Description>
+          <Modal.Header class="modal-header">
+            <div><span class="eyebrow">RETURN PACKAGE</span><Modal.Title>外场版本比对包 · 回传对账</Modal.Title></div>
+            <Modal.Close class="modal-close">×</Modal.Close>
+          </Modal.Header>
+          <Modal.Description class="modal-description">
+            选择外场编目组导出的比对包（JSON）。系统按拓片号稳定挂回；同包重试自动跳过已处理条目，中断后可选同一包续传；旧版包自动迁移。
+          </Modal.Description>
+
           <div class="import-controls">
-            <label class="radio-card"><input type="radio" checked={importGroup.value === 'A'} onChange$={() => importGroup.value = 'A'} /><span><strong>A 组</strong><small>口述史 / 主要记录</small></span></label>
-            <label class="radio-card"><input type="radio" checked={importGroup.value === 'B'} onChange$={() => importGroup.value = 'B'} /><span><strong>B 组</strong><small>手稿 / 待合并记录</small></span></label>
-            <label class="file-button">选择文件<input type="file" accept=".json,.txt,.csv,.tsv" onChange$={(event, element) => importFile(event, element)} /></label>
+            <label class="file-button">选择比对包文件<input type="file" accept=".json" onChange$={(event, element) => readFile(event, element)} /></label>
+            {importName.value && <span class="file-picked">已读取：{importName.value}</span>}
           </div>
-          <textarea class="modal-textarea" value={importRaw.value} onInput$={(event) => importRaw.value = (event.target as HTMLTextAreaElement).value} placeholder="李秀珍口述史访谈 | 2019-04-12 | 李秀珍、周明远 | 临河县 | OH-LXZ-2019-01 | 数字录音 | 02:14:38 | 研究者授权 | ..." />
-          {importText.value && <div class="file-name">已读取：{importText.value}</div>}
-          <Modal.Footer class="modal-footer"><Modal.Close class="button ghost">取消</Modal.Close><button class="button primary" disabled={!importRaw.value.trim()} onClick$={parseImport}>导入并重新匹配</button></Modal.Footer>
+
+          {parsedPkg.value && (
+            <div class="pkg-preview">
+              <div><span>包号</span><code>{parsedPkg.value.packageId}</code></div>
+              <div><span>版本</span>{parsedPkg.value.packageVersion < 2
+                ? <b class="legacy">v{parsedPkg.value.packageVersion}（旧版，将兼容迁移）</b>
+                : <b>v{parsedPkg.value.packageVersion}</b>}</div>
+              <div><span>外场导出时间</span>{new Date(parsedPkg.value.exportedAt).toLocaleString('zh-CN')}</div>
+              <div><span>条目数</span>{parsedPkg.value.items.length}</div>
+              <div class="pkg-items">
+                {parsedPkg.value.items.map((item) => {
+                  const key = `${parsedPkg.value!.packageId}:${item.itemNo}`;
+                  const done = state.importedItems.some((entry) => entry.key === key);
+                  const local = state.records.find((r) => r.stableId === item.stableId);
+                  return (
+                    <div class={`pkg-item ${done ? 'done' : ''}`} key={key}>
+                      <code>{item.itemNo}</code>
+                      <code>{item.stableId}</code>
+                      <span>{item.title}</span>
+                      <em>{done ? '已导入·重试将跳过' : local ? '将挂回已有记录' : '将新建档'}</em>
+                    </div>
+                  );
+                })}
+              </div>
+              <label class="fail-sim">
+                <Checkbox.Root bind:checked={simulateFail}>
+                  <Checkbox.Indicator>✓</Checkbox.Indicator>
+                </Checkbox.Root>
+                <span>模拟写入中断，处理 <input
+                  type="number" min={1} max={parsedPkg.value.items.length} value={failAfter.value}
+                  onInput$={(event) => { failAfter.value = Number((event.target as HTMLInputElement).value) || 1; }}
+                  onClick$={(event) => event.stopPropagation()}
+                /> 条后停止（用于验证续传与不重复建档）</span>
+              </label>
+            </div>
+          )}
+
+          {parseError.value && <div class="import-error">{parseError.value}</div>}
+
+          {importReport.value && (
+            <div class={`import-report ${importReport.value.interrupted ? 'warn' : ''}`}>
+              <strong>{importReport.value.interrupted ? '⚠ 写入中断，进度已保留' : '✓ 本轮导入结果'}</strong>
+              <ul>
+                <li>新建档 {importReport.value.results.filter((r) => r.created).length} 件，挂回已有 {importReport.value.results.filter((r) => !r.created).length} 件</li>
+                <li>新增待裁项 {importReport.value.results.flatMap((r) => r.newDisputes).length} 项（并列保留）</li>
+                <li>已确认字段被保护未覆盖：{importReport.value.results.reduce((n, r) => n + r.blockedFields.length, 0)} 处</li>
+                <li>指纹不一致（仅提示）：{importReport.value.results.filter((r) => r.fingerprintMismatch).length} 件</li>
+                {importReport.value.skipped > 0 && <li>重试跳过已处理条目 {importReport.value.skipped} 条，未重复建档</li>}
+              </ul>
+              {importReport.value.interrupted
+                ? <p>已处理 {importReport.value.results.length}/{importReport.value.total} 条。保留此包，点击「续传导入」从断点继续。</p>
+                : <p>整包 {importReport.value.total} 条已全部处理完毕。再次导入同一包将全部幂等跳过。</p>}
+            </div>
+          )}
+
+          <Modal.Footer class="modal-footer">
+            <Modal.Close class="button ghost" onClick$={closeImport}>{importReport.value?.interrupted ? '关闭（保留续传）' : '关闭'}</Modal.Close>
+            {importReport.value?.interrupted
+              ? <button class="button primary" onClick$={resumeImport}>续传导入（不重复建档）</button>
+              : <button class="button primary" disabled={!parsedPkg.value} onClick$={() => runImport()}>对账导入</button>}
+          </Modal.Footer>
         </Modal.Panel>
       </Modal.Root>
 
-      <Modal.Root bind:show={mergeOpen} closeOnBackdropClick>
-        <Modal.Panel class="modal-panel merge-modal">
-          <Modal.Header class="modal-header"><div><span class="eyebrow">FIELD MERGE</span><Modal.Title>逐字段选择保留来源</Modal.Title></div><Modal.Close class="modal-close">×</Modal.Close></Modal.Header>
-          {activeMatch.value && (() => {
-            const left = recordById(state, activeMatch.value!.leftId)!;
-            const right = recordById(state, activeMatch.value!.rightId)!;
+      {/* 裁定 */}
+      <Modal.Root bind:show={resolveOpen} closeOnBackdropClick>
+        <Modal.Panel class="modal-panel resolve-modal">
+          {(() => {
+            const dispute = state.disputes.find((item) => item.id === activeDisputeId.value);
+            const record = dispute ? byStable(state, dispute.stableId) : undefined;
+            if (!dispute || !record) return <></>;
+            const fieldState = record[dispute.field];
             return <>
-              <Modal.Description class="modal-description">每个字段都显示两条记录的原始来源。选择后，生成一条新合并记录，原记录编号与选择依据仍保留在审计轨迹中。</Modal.Description>
-              <div class="field-picker-head"><span>字段</span><span>A 组来源</span><span>B 组来源</span></div>
-              <div class="field-picker">
-                {fieldLabels.map(([field, label]) => {
-                  const leftValue = fieldValue(left, field) || '—';
-                  const rightValue = fieldValue(right, field) || '—';
-                  const same = leftValue === rightValue;
-                  return <div class={`field-picker-row ${same ? 'same' : 'conflict'}`} key={field}><div class="picker-label"><strong>{label}</strong>{same ? <small>一致</small> : <small>冲突</small>}</div><label class={`source-option ${choices[field] === 'A' ? 'selected' : ''}`}><input type="radio" name={`field-${field}`} checked={choices[field] === 'A'} onChange$={() => choices[field] = 'A'} /><span><b>A</b>{leftValue}</span></label><label class={`source-option ${choices[field] === 'B' ? 'selected' : ''}`}><input type="radio" name={`field-${field}`} checked={choices[field] === 'B'} onChange$={() => choices[field] = 'B'} /><span><b>B</b>{rightValue}</span></label><button class={`combine-button ${choices[field] === 'combine' ? 'selected' : ''}`} onClick$={() => choices[field] = 'combine'} title="拼接两侧内容">拼接</button></div>;
-                })}
+              <Modal.Header class="modal-header">
+                <div><span class="eyebrow">RESOLVE · {DISPUTE_LABELS[dispute.field]}</span><Modal.Title>{record.title}</Modal.Title></div>
+                <Modal.Close class="modal-close">×</Modal.Close>
+              </Modal.Header>
+              <Modal.Description class="modal-description">
+                拓片号 <code>{record.stableId}</code> 的{DISPUTE_LABELS[dispute.field]}存在 {dispute.variants.length} 种并列说法。确认后其余候选仍留档备查，但此后回传不得覆盖该结果。
+                {fieldState.confirmed && <b class="already-locked">该字段此前已确认为“{fieldState.chosen}”，如要改判请先撤销。</b>}
+              </Modal.Description>
+              <div class="choice-list">
+                {dispute.variants.map((value) => (
+                  <label class={`choice-option ${chosenValue.value === value ? 'selected' : ''}`} key={value}>
+                    <input type="radio" name="resolve-choice" checked={chosenValue.value === value} onChange$={() => chosenValue.value = value} />
+                    <span>{value}</span>
+                  </label>
+                ))}
+                <label class="choice-option custom">
+                  <input type="radio" name="resolve-choice" checked={!dispute.variants.includes(chosenValue.value)} onChange$={() => chosenValue.value = ''} />
+                  <input
+                    class="input custom-input"
+                    placeholder="另填一个裁定值（也会并入候选留档）"
+                    value={dispute.variants.includes(chosenValue.value) ? '' : chosenValue.value}
+                    onInput$={(event) => { chosenValue.value = (event.target as HTMLInputElement).value; }}
+                  />
+                </label>
               </div>
-              <Modal.Footer class="modal-footer"><Modal.Close class="button ghost">取消</Modal.Close><button class="button primary" onClick$={mergeCurrent}>生成合并记录</button></Modal.Footer>
+              <Modal.Footer class="modal-footer">
+                <Modal.Close class="button ghost">取消</Modal.Close>
+                <button class="button primary" onClick$={applyResolve} disabled={fieldState.confirmed}>确认并锁定该字段</button>
+              </Modal.Footer>
             </>;
           })()}
+        </Modal.Panel>
+      </Modal.Root>
+
+      {/* 改本机编号 */}
+      <Modal.Root bind:show={renameOpen} closeOnBackdropClick>
+        <Modal.Panel class="modal-panel small-modal">
+          <Modal.Header class="modal-header">
+            <div><span class="eyebrow">LOCAL NUMBER</span><Modal.Title>修改本机编号</Modal.Title></div>
+            <Modal.Close class="modal-close">×</Modal.Close>
+          </Modal.Header>
+          {(() => {
+            const record = byStable(state, renameTargetId.value);
+            if (!record) return <></>;
+            return <Modal.Description class="modal-description">
+              稳定拓片号 <code>{record.stableId}</code> 永不改变，是回传挂接的唯一依据。当前本机编号 <b>{record.localNo}</b> 将移入曾用编号别名。
+              <input class="input rename-input" value={renameValue.value} onInput$={(event) => renameValue.value = (event.target as HTMLInputElement).value} />
+            </Modal.Description>;
+          })()}
+          <Modal.Footer class="modal-footer">
+            <Modal.Close class="button ghost">取消</Modal.Close>
+            <button class="button primary" onClick$={applyRename}>保存本机编号</button>
+          </Modal.Footer>
         </Modal.Panel>
       </Modal.Root>
     </div>
